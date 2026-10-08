@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Green Change Monitor</title>
+  <meta name="description" content="Map where trees and vegetation were lost or gained between two years, anywhere, using free Sentinel-2 satellite imagery read directly in the browser. Flags changes inside conservation areas and tree preservation areas in England.">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32" width="24" height="24"><path d="M16 3c-5 6-8 10-8 14a8 8 0 0 0 16 0c0-4-3-8-8-14z" fill="#a3e635"/><path d="M16 12v17" stroke="#0f3d3e" stroke-width="2"/><circle cx="25" cy="7" r="3" fill="none" stroke="#e2e8f0" stroke-width="1.6"/><path d="M22 4l6 6" stroke="#e2e8f0" stroke-width="1.6"/></svg>
+      </span>
+      <div>
+        <h1>Green Change Monitor</h1>
+        <p>Where were trees and green space lost or gained? Free Sentinel-2 satellite imagery &middot; <span class="credit">by @ET</span></p>
+      </div>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel" aria-label="Controls and results">
+      <form id="controls" class="block" autocomplete="off">
+        <label for="place">Go to a place</label>
+        <div class="row">
+          <input id="place" type="search" placeholder="Postcode or place, e.g. KT1 1EU">
+          <button class="btn" type="button" id="go">Go</button>
+        </div>
+        <p class="hint">Then move the map so the box covers the area to check.</p>
+
+        <div class="grid2">
+          <label>Box size
+            <select id="size">
+              <option value="500">500 m</option>
+              <option value="1000" selected>1 km</option>
+              <option value="2000">2 km</option>
+              <option value="3000">3 km</option>
+            </select>
+          </label>
+          <label>Season
+            <select id="season">
+              <option value="summer" selected>Summer (Jun–Aug)</option>
+              <option value="growing">Growing season (May–Sep)</option>
+            </select>
+          </label>
+          <label>Before
+            <select id="y0"></select>
+          </label>
+          <label>After
+            <select id="y1"></select>
+          </label>
+          <label class="span2">Sensitivity
+            <select id="sens">
+              <option value="0.35">Low: only big, clear changes</option>
+              <option value="0.25" selected>Medium</option>
+              <option value="0.18">High: more changes, more false alarms</option>
+            </select>
+          </label>
+        </div>
+        <button class="btn btn-primary" id="run" type="submit">Find changes</button>
+        <div id="status" class="status" aria-live="polite"></div>
+      </form>
+
+      <div id="results"></div>
+
+      <section class="block about">
+        <h2>How it works</h2>
+        <ol>
+          <li>For each year it finds the clearest Sentinel-2 images for the season from Element 84's free Earth Search catalogue.</li>
+          <li>It reads only the pixels inside the box (no downloads of whole images), masks clouds and shadows with each image's scene classification, and takes the median greenness (NDVI) of up to three images.</li>
+          <li>Pixels that were clearly vegetated and became much less green are marked as <strong>loss</strong>; the reverse is <strong>gain</strong>. Patches smaller than about 300 m² are ignored.</li>
+          <li>In England, patches are checked against conservation areas and tree preservation areas from planning.data.gov.uk.</li>
+        </ol>
+        <h2>Limits</h2>
+        <ul>
+          <li>Pixels are 10 m, so it sees groups of trees and lawns, not single small trees or extensions.</li>
+          <li>Drought, mowing, crops and late spring can look like loss. Compare the true colour views before acting.</li>
+          <li>It's a pointer for where to look, not evidence on its own.</li>
+        </ul>
+        <p class="muted small">Contains modified Copernicus Sentinel data, processed by ESA, accessed via Element 84 Earth Search on AWS. Planning designations from planning.data.gov.uk (OGL v3.0). Basemap &copy; Esri.</p>
+        <p><strong>Created by @ET.</strong></p>
+      </section>
+    </section>
+
+    <section class="map-wrap" aria-label="Map">
+      <div id="map"></div>
+      <div class="legend" id="legend" hidden>
+        <span><i class="k k-loss"></i>Loss</span>
+        <span><i class="k k-gain"></i>Gain</span>
+        <span><i class="k k-nd"></i>No clear data</span>
+        <span><i class="k k-ca"></i>Conservation area</span>
+        <span><i class="k k-tpo"></i>TPO area</span>
+      </div>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/proj4@2.11.0/dist/proj4.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/geotiff@2.1.3/dist-browser/geotiff.js"></script>
+  <script src="js/change.js"></script>
+  <script src="js/imagery.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
