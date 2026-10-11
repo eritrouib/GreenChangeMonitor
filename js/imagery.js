@@ -86,15 +86,36 @@ function createReader({ GeoTIFF, proj4 }) {
 }
 
 /**
- * Build a cloud-free NDVI composite for one year from up to `maxScenes` clear scenes.
+ * Order scenes so they spread across the season: the clearest scene of each
+ * month first, then the next clearest of each month, and so on. A composite
+ * built from several dates is far less sensitive to one odd day.
+ */
+function spreadAcrossSeason(candidates) {
+  const byMonth = new Map();
+  for (const item of candidates) {               // candidates are clearest first
+    const m = String(item.properties.datetime).slice(0, 7);
+    if (!byMonth.has(m)) byMonth.set(m, []);
+    byMonth.get(m).push(item);
+  }
+  const queues = [...byMonth.values()];
+  const out = [];
+  for (let round = 0; out.length < candidates.length; round++) {
+    for (const q of queues) if (q[round]) out.push(q[round]);
+  }
+  return out;
+}
+
+/**
+ * Build a cloud-free "greenest" NDVI composite for one year from up to
+ * `maxScenes` clear scenes spread across the season.
  * Returns {ndvi, count, scenes: [{id, date, cloud, validFraction}], visual: {r,g,b}|null}.
  */
-async function yearComposite({ fetchFn, reader, grid, year, season, maxScenes = 3, minValid = 0.5, onStatus = () => {} }) {
+async function yearComposite({ fetchFn, reader, grid, year, season, maxScenes = 5, minValid = 0.5, onStatus = () => {} }) {
   onStatus(`Searching ${year} images…`);
-  const candidates = await searchScenes(fetchFn, grid, year, season);
+  const candidates = spreadAcrossSeason(await searchScenes(fetchFn, grid, year, season));
   if (!candidates.length) throw new Error(`No ${year} images with little cloud were found for this area.`);
   const chosen = [];
-  for (const item of candidates.slice(0, 8)) {
+  for (const item of candidates.slice(0, 12)) {
     if (chosen.length >= maxScenes) break;
     const date = item.properties.datetime.slice(0, 10);
     onStatus(`${year}: checking clouds on ${date}…`);
@@ -119,9 +140,9 @@ async function yearComposite({ fetchFn, reader, grid, year, season, maxScenes = 
       reader.readToGrid(c.item.assets.nir.href, grid, c.epsg),
     ]);
     const { scale, offset } = C.scaling(c.item, 'red');
-    layers.push(C.sceneNdvi(red, nir, c.scl, { scale, offset }).ndvi);
+    layers.push(C.sceneNdvi(red, nir, c.scl, { scale, offset, width: grid.width }).ndvi);
   }
-  const comp = C.medianComposite(layers);
+  const comp = C.greenestComposite(layers);
 
   let visual = null;
   const best = chosen.reduce((a, b) => (b.validFraction > a.validFraction ? b : a));
@@ -138,5 +159,5 @@ async function yearComposite({ fetchFn, reader, grid, year, season, maxScenes = 
   };
 }
 
-globalThis.GCImagery = { EARTH_SEARCH, SEASONS, searchScenes, createReader, yearComposite, epsgOf };
+globalThis.GCImagery = { EARTH_SEARCH, SEASONS, searchScenes, spreadAcrossSeason, createReader, yearComposite, epsgOf };
 })();

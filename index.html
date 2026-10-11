@@ -69,15 +69,16 @@
       <section class="block about">
         <h2>How it works</h2>
         <ol>
-          <li>For each year it finds the clearest Sentinel-2 images for the season from Element 84's free Earth Search catalogue.</li>
-          <li>It reads only the pixels inside the box (no downloads of whole images), masks clouds and shadows with each image's scene classification, and takes the median greenness (NDVI) of up to three images.</li>
-          <li>Pixels that were clearly vegetated and became much less green are marked as <strong>loss</strong>; the reverse is <strong>gain</strong>. Patches smaller than about 300 m² are ignored.</li>
+          <li>For each year it finds clear Sentinel-2 images spread across the season (the clearest from each month first) from Element 84's free Earth Search catalogue.</li>
+          <li>It reads only the pixels inside the box (no downloads of whole images), masks clouds, cloud shadows and a 20 m margin around them, and keeps each pixel's greenest reading of the season (NDVI) from up to five images. Haze, missed cloud edges and grass browning in a dry spell all make places look less green, so this keeps them from showing up as loss.</li>
+          <li>A pixel counts as <strong>loss</strong> only if it was clearly green (NDVI 0.5 or more), is no longer green (below 0.35) and dropped by more than the sensitivity setting, with at least two clear readings in each year. <strong>Gain</strong> is the reverse. Patches smaller than 500 m² are ignored, and the totals only count the patches shown.</li>
           <li>In England, patches are checked against conservation areas and tree preservation areas from planning.data.gov.uk.</li>
         </ol>
         <h2>Limits</h2>
         <ul>
           <li>Pixels are 10 m, so it sees groups of trees and lawns, not single small trees or extensions.</li>
-          <li>Drought, mowing, crops and late spring can look like loss. Compare the true colour views before acting.</li>
+          <li>Severe drought, crops, construction sites with spoil and late spring can still look like loss, and trees felled late in the second year may only show the following year. Compare the true colour views before acting.</li>
+          <li>Thinning, or trees replaced by grass, stays green and isn't counted.</li>
           <li>It's a pointer for where to look, not evidence on its own.</li>
         </ul>
         <p class="muted small">Contains modified Copernicus Sentinel data, processed by ESA, accessed via Element 84 Earth Search on AWS. Planning designations from planning.data.gov.uk (OGL v3.0). Basemap &copy; Esri.</p>

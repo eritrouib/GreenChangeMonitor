@@ -8,11 +8,17 @@
 // 4 vegetation, 5 not vegetated, 6 water, 7 unclassified. Everything else
 // (no data, saturated, dark/shadow, cloud shadow, clouds, cirrus, snow) is masked.
 const SCL_VALID = new Set([4, 5, 6, 7]);
+// Clouds and their shadows. Their edges are often missed by SCL and read as
+// "less green", so pixels next to them are masked too (see sceneNdvi).
+const SCL_CLOUDY = new Set([3, 8, 9, 10]);
 
 const DEFAULTS = {
-  vegetated: 0.45, // NDVI at or above this counts as vegetation
+  vegetated: 0.5, // NDVI at or above this counts as vegetation
+  bare: 0.35, // NDVI below this counts as no longer vegetated (bare ground, buildings, water)
   delta: 0.25, // NDVI change needed to count as loss or gain
-  minPixels: 3, // smallest patch reported (3 pixels ≈ 300 m²)
+  minPixels: 5, // smallest patch reported (5 pixels = 500 m², 0.05 ha)
+  minCount: 2, // clear readings needed in each year before a pixel can count as changed
+  cloudBuffer: 2, // grid cells (10 m) masked around clouds and cloud shadows
 };
 
 const M_PER_DEG_LAT = 111320;
@@ -95,13 +101,32 @@ function sampleToGrid(grid, win, toProj, nodata = 0) {
   return out;
 }
 
-/** NDVI for one scene, masked by SCL. Reflectance = DN * scale + offset. */
-function sceneNdvi(red, nir, scl, { scale = 1e-4, offset = 0 } = {}) {
+/** Mask of cells within `buffer` cells of a cloud or cloud shadow (grid of `width` columns). */
+function cloudBufferMask(scl, width, buffer = DEFAULTS.cloudBuffer) {
+  const n = scl.length, height = Math.round(n / width);
+  const near = new Uint8Array(n);
+  if (!buffer || !width) return near;
+  for (let i = 0; i < n; i++) {
+    if (!SCL_CLOUDY.has(scl[i])) continue;
+    const r = Math.floor(i / width), c = i % width;
+    for (let rr = Math.max(0, r - buffer); rr <= Math.min(height - 1, r + buffer); rr++) {
+      for (let cc = Math.max(0, c - buffer); cc <= Math.min(width - 1, c + buffer); cc++) near[rr * width + cc] = 1;
+    }
+  }
+  return near;
+}
+
+/**
+ * NDVI for one scene, masked by SCL. Reflectance = DN * scale + offset.
+ * With `width` (grid columns), cells next to clouds and cloud shadows are masked too.
+ */
+function sceneNdvi(red, nir, scl, { scale = 1e-4, offset = 0, width = 0, buffer = DEFAULTS.cloudBuffer } = {}) {
   const n = red.length;
   const out = new Float32Array(n).fill(NaN);
+  const near = cloudBufferMask(scl, width, buffer);
   let valid = 0;
   for (let i = 0; i < n; i++) {
-    if (!SCL_VALID.has(scl[i])) continue;
+    if (!SCL_VALID.has(scl[i]) || near[i]) continue;
     const r = Math.max(0, red[i] * scale + offset);
     const ni = Math.max(0, nir[i] * scale + offset);
     if (Number.isNaN(r) || Number.isNaN(ni) || r + ni <= 0) continue;
@@ -137,11 +162,39 @@ function medianComposite(layers) {
 }
 
 /**
+ * "Greenest" composite: for each pixel, the second-highest clear NDVI of the
+ * season (the highest if there are fewer than three readings). Leftover haze,
+ * cloud edges and shadows, and grass browning in a dry spell all make a pixel
+ * look *less* green, so taking the green end of the season keeps them from
+ * showing up as loss. Returns {value, count}.
+ */
+function greenestComposite(layers) {
+  const n = layers[0].length;
+  const value = new Float32Array(n).fill(NaN);
+  const count = new Uint8Array(n);
+  const buf = [];
+  for (let i = 0; i < n; i++) {
+    buf.length = 0;
+    for (const l of layers) if (!Number.isNaN(l[i])) buf.push(l[i]);
+    count[i] = buf.length;
+    if (!buf.length) continue;
+    buf.sort((a, b) => a - b);
+    value[i] = buf.length >= 3 ? buf[buf.length - 2] : buf[buf.length - 1];
+  }
+  return { value, count };
+}
+
+/**
  * Classify change between two NDVI composites.
+ * Loss: vegetated before, no longer vegetated after, and a big enough drop.
+ * Gain: the reverse. A pixel that stays green but a bit less so (thinning,
+ * a dry summer, a different date) is not counted as loss.
+ * Pixels without `minCount` clear readings in both years can't change
+ * (pass counts as opts.countBefore / opts.countAfter).
  * Returns class codes: 0 no data, 1 stable, 2 loss, 3 gain, plus delta per pixel.
  */
 function classify(before, after, opts = {}) {
-  const { vegetated, delta } = { ...DEFAULTS, ...opts };
+  const { vegetated, bare, delta, minCount, countBefore, countAfter } = { ...DEFAULTS, ...opts };
   const n = before.length;
   const cls = new Uint8Array(n);
   const d = new Float32Array(n).fill(NaN);
@@ -149,11 +202,58 @@ function classify(before, after, opts = {}) {
     const b = before[i], a = after[i];
     if (Number.isNaN(b) || Number.isNaN(a)) continue;
     d[i] = a - b;
-    if (b >= vegetated && a - b <= -delta) cls[i] = 2;
-    else if (a >= vegetated && a - b >= delta) cls[i] = 3;
+    const sure = (!countBefore || countBefore[i] >= minCount) && (!countAfter || countAfter[i] >= minCount);
+    if (sure && b >= vegetated && a < bare && a - b <= -delta) cls[i] = 2;
+    else if (sure && a >= vegetated && b < bare && a - b >= delta) cls[i] = 3;
     else cls[i] = 1;
   }
   return { cls, delta: d };
+}
+
+/**
+ * Minimum mapping unit: loss/gain pixels in patches smaller than `minPixels`
+ * go back to stable, so the headline areas only count changes big enough to report.
+ */
+function sieve(grid, cls, minPixels = DEFAULTS.minPixels) {
+  const out = Uint8Array.from(cls);
+  const { width: w, height: h } = grid;
+  const seen = new Uint8Array(w * h);
+  const stack = [], cells = [];
+  for (let start = 0; start < w * h; start++) {
+    const t = out[start];
+    if (seen[start] || (t !== 2 && t !== 3)) continue;
+    cells.length = 0;
+    stack.push(start);
+    seen[start] = 1;
+    while (stack.length) {
+      const i = stack.pop();
+      cells.push(i);
+      const r = Math.floor(i / w), c = i % w;
+      for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+        const rr = r + dr, cc = c + dc;
+        if ((!dr && !dc) || rr < 0 || cc < 0 || rr >= h || cc >= w) continue;
+        const j = rr * w + cc;
+        if (!seen[j] && out[j] === t) { seen[j] = 1; stack.push(j); }
+      }
+    }
+    if (cells.length < minPixels) for (const i of cells) out[i] = 1;
+  }
+  return out;
+}
+
+/**
+ * How much greener or browner the whole box is in the second year, measured on
+ * pixels that were vegetated before (median NDVI change). A big drop usually means
+ * a dry summer or different dates, not real loss.
+ */
+function greennessShift(before, after, vegetated = DEFAULTS.vegetated) {
+  const v = [];
+  for (let i = 0; i < before.length; i++) {
+    if (before[i] >= vegetated && !Number.isNaN(after[i])) v.push(after[i] - before[i]);
+  }
+  if (!v.length) return null;
+  v.sort((a, b) => a - b);
+  return v[v.length >> 1];
 }
 
 /** Connected patches (8-neighbour) of one class, largest first. */
@@ -277,8 +377,9 @@ function scaling(item, assetKey) {
 }
 
 globalThis.GCChange = {
-  SCL_VALID, DEFAULTS, makeGrid, cellCenter, utmCode, gridBoundsIn, windowFor, sampleToGrid,
-  sceneNdvi, validFraction, medianComposite, classify, patches, summary, changeImage, rgbImage,
+  SCL_VALID, SCL_CLOUDY, DEFAULTS, makeGrid, cellCenter, utmCode, gridBoundsIn, windowFor, sampleToGrid,
+  cloudBufferMask, sceneNdvi, validFraction, medianComposite, greenestComposite, classify, sieve, greennessShift,
+  patches, summary, changeImage, rgbImage,
   patchesToGeoJSON, scaling,
 };
 })();

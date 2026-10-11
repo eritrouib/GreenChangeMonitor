@@ -107,10 +107,16 @@ $('#controls').addEventListener('submit', async (e) => {
     const b = await I.yearComposite({ fetchFn: fetch, reader, grid, year: before, season, onStatus });
     const a = await I.yearComposite({ fetchFn: fetch, reader, grid, year: after, season, onStatus });
     status('Comparing…', true);
-    const { cls, delta: d } = C.classify(b.ndvi, a.ndvi, { delta });
+    // With only one clear image in a year, one reading per pixel is all there is.
+    const minCount = Math.min(2, b.scenes.length, a.scenes.length);
+    const raw = C.classify(b.ndvi, a.ndvi, { delta, minCount, countBefore: b.count, countAfter: a.count });
+    const cls = C.sieve(grid, raw.cls);
+    const d = raw.delta;
     const loss = C.patches(grid, cls, d, 2);
     const gain = C.patches(grid, cls, d, 3);
     const sum = C.summary(grid, cls, b.ndvi, a.ndvi);
+    sum.shift = C.greennessShift(b.ndvi, a.ndvi);
+    sum.singleScene = minCount < 2;
     state.result = { grid, before: b, after: a, years: [before, after], cls, loss, gain, sum, season, delta };
     status('Checking planning designations…', true);
     state.result.designations = await designations(grid).catch(() => null);
@@ -234,6 +240,10 @@ function drawResult() {
   const ha = (x) => (x < 1 ? x.toFixed(2) : x.toFixed(1));
   const covWarn = sum.coverage < 0.8
     ? `<div class="note warn">Only ${Math.round(sum.coverage * 100)}% of the box had clear readings in both years (clouds or image edges). Grey areas weren't compared.</div>` : '';
+  const shiftWarn = sum.shift != null && Math.abs(sum.shift) >= 0.08
+    ? `<div class="note warn">Green areas are ${sum.shift < 0 ? 'browner' : 'greener'} overall in ${years[1]} than in ${years[0]} (typical NDVI change ${sum.shift > 0 ? '+' : ''}${sum.shift.toFixed(2)}). That usually means a ${sum.shift < 0 ? 'dry summer' : 'wetter season'} or different image dates, not real change. Patches here only count where the ground went from clearly green to clearly not green, but treat borderline ones with care.</div>` : '';
+  const oneWarn = sum.singleScene
+    ? '<div class="note warn">Only one clear image was found for at least one of the years, so each pixel rests on a single reading. Treat the results as rough; another season or year may give more images.</div>' : '';
   const sceneList = (y, s) => `${y}: ${s.scenes.map((x) => `${x.date} (${Math.round(x.validFraction * 100)}% clear)`).join(', ')}`;
   const list = (arr, max) => arr.slice(0, max).map((p) => {
     const i = (p.kind === 'loss' ? loss : gain).indexOf(p);
@@ -254,7 +264,7 @@ function drawResult() {
         <div class="tile"><div class="num">${Math.round(sum.vegBeforePct)}% → ${Math.round(sum.vegAfterPct)}%</div><div class="lbl">of the box green</div></div>
         <div class="tile"><div class="num">${flagged}</div><div class="lbl">loss patches in a TPO or conservation area</div></div>
       </div>
-      ${covWarn}
+      ${covWarn}${shiftWarn}${oneWarn}
       <div class="views" role="group" aria-label="Map view">
         <button class="btn btn-small" data-view="change" aria-pressed="true">Change</button>
         ${before.visual ? `<button class="btn btn-small" data-view="before" aria-pressed="false">${years[0]} true colour</button>` : ''}

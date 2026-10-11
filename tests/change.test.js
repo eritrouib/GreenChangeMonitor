@@ -57,25 +57,68 @@ test('classify and find patches', () => {
   const after = new Float32Array(100).fill(0.7);
   for (const i of [11, 12, 21, 22, 23]) after[i] = 0.2; // a 5-cell clearing
   after[88] = 0.2; // single pixel: too small to report
-  before[55] = 0.1; after[55] = 0.6; before[56] = 0.1; after[56] = 0.6; before[65] = 0.1; after[65] = 0.6; // 3-cell gain
+  for (const i of [55, 56, 65, 66, 75]) { before[i] = 0.1; after[i] = 0.6; } // 5-cell gain
   before[99] = NaN;
-  const { cls, delta } = C.classify(before, after);
-  assert.equal(cls[11], 2);
-  assert.equal(cls[55], 3);
-  assert.equal(cls[0], 1);
-  assert.equal(cls[99], 0);
-  const loss = C.patches(g, cls, delta, 2);
+  const raw = C.classify(before, after);
+  assert.equal(raw.cls[11], 2);
+  assert.equal(raw.cls[55], 3);
+  assert.equal(raw.cls[0], 1);
+  assert.equal(raw.cls[99], 0);
+  assert.equal(raw.cls[88], 2);
+  const cls = C.sieve(g, raw.cls);
+  assert.equal(cls[88], 1, 'single pixel sieved out of the totals');
+  const loss = C.patches(g, cls, raw.delta, 2);
   assert.equal(loss.length, 1);
   assert.equal(loss[0].pixels, 5);
   assert.equal(loss[0].areaM2, 500);
   assert.ok(loss[0].meanDelta < -0.4);
-  const gain = C.patches(g, cls, delta, 3);
+  const gain = C.patches(g, cls, raw.delta, 3);
   assert.equal(gain.length, 1);
   const s = C.summary(g, cls, before, after);
-  assert.ok(Math.abs(s.lossHa - 0.06) < 1e-9, String(s.lossHa));
-  assert.ok(Math.abs(s.gainHa - 0.03) < 1e-9);
+  assert.ok(Math.abs(s.lossHa - 0.05) < 1e-9, String(s.lossHa));
+  assert.ok(Math.abs(s.gainHa - 0.05) < 1e-9);
   const gj = C.patchesToGeoJSON(g, loss);
   assert.equal(gj.features[0].geometry.coordinates.length, 5);
+});
+
+test('a dry summer is not loss: green that stays green, only browner, does not count', () => {
+  const g = C.makeGrid(LAT, LON, 200); // 20 x 20
+  const before = new Float32Array(400).fill(0.78);
+  const after = new Float32Array(400).fill(0.48); // grass browned: a 0.30 drop everywhere
+  for (let r = 2; r < 6; r++) for (let c = 2; c < 6; c++) after[r * 20 + c] = 0.12; // a real 16-cell clearing
+  const cls = C.sieve(g, C.classify(before, after).cls);
+  const s = C.summary(g, cls, before, after);
+  assert.ok(Math.abs(s.lossHa - 0.16) < 1e-9, `only the clearing counts, got ${s.lossHa} ha`);
+  assert.ok(C.greennessShift(before, after) < -0.25, 'the overall browning is reported as a warning instead');
+});
+
+test('pixels need two clear readings in each year to change', () => {
+  const before = Float32Array.from([0.8, 0.8]);
+  const after = Float32Array.from([0.1, 0.1]);
+  const { cls } = C.classify(before, after, { minCount: 2, countBefore: Uint8Array.from([3, 1]), countAfter: Uint8Array.from([2, 3]) });
+  assert.deepEqual([...cls], [2, 1]);
+});
+
+test('greenest composite ignores one hazy or shadowed reading', () => {
+  const clear1 = Float32Array.from([0.80, 0.30]);
+  const hazy = Float32Array.from([0.35, 0.10]);
+  const clear2 = Float32Array.from([0.78, 0.28]);
+  const g = C.greenestComposite([clear1, hazy, clear2]);
+  assert.ok(Math.abs(g.value[0] - 0.78) < 1e-6); // second highest of three
+  assert.ok(Math.abs(g.value[1] - 0.28) < 1e-6);
+  const m = C.medianComposite([clear1, hazy, hazy]);
+  assert.ok(m.value[0] < 0.4, 'a median of mostly hazy readings would have looked like loss');
+});
+
+test('cells next to clouds and shadows are masked', () => {
+  const w = 7, n = 49;
+  const scl = new Float32Array(n).fill(4);
+  scl[24] = 9; // a cloud in the middle
+  const red = new Float32Array(n).fill(500), nir = new Float32Array(n).fill(3000);
+  const { ndvi } = C.sceneNdvi(red, nir, scl, { width: w, buffer: 2 });
+  assert.ok(Number.isNaN(ndvi[24]));
+  assert.ok(Number.isNaN(ndvi[24 - 2]) && Number.isNaN(ndvi[24 + 2 * w]), 'two cells around are masked');
+  assert.ok(!Number.isNaN(ndvi[0]), 'far cells are kept');
 });
 
 test('scaling from STAC raster:bands, falling back on processing baseline', () => {
