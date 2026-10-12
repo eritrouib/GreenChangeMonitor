@@ -78,25 +78,41 @@ function windowFor(bounds, origin, resolution, width, height) {
 }
 
 /**
- * Sample a raster window onto the grid (nearest neighbour).
- * win = {data, x0, y0, w, h, origin, resolution}; toProj maps [lon, lat] -> [x, y].
- * Returns a Float32Array of grid size; NaN where outside or nodata.
+ * Projected coordinates of every grid cell centre. Worth computing once per
+ * grid and projection: every scene and band in the same UTM zone reuses them.
  */
-function sampleToGrid(grid, win, toProj, nodata = 0) {
-  const out = new Float32Array(grid.width * grid.height).fill(NaN);
-  const [ox, oy] = win.origin;
-  const [rx, ry] = win.resolution;
-  for (let row = 0; row < grid.height; row++) {
-    for (let col = 0; col < grid.width; col++) {
+function projectGrid(grid, toProj) {
+  const n = grid.width * grid.height;
+  const xs = new Float64Array(n), ys = new Float64Array(n);
+  for (let row = 0, i = 0; row < grid.height; row++) {
+    for (let col = 0; col < grid.width; col++, i++) {
       const c = cellCenter(grid, col, row);
       const [x, y] = toProj([c.lon, c.lat]);
-      const px = Math.floor((x - ox) / rx) - win.x0;
-      const py = Math.floor((y - oy) / ry) - win.y0;
-      if (px < 0 || py < 0 || px >= win.w || py >= win.h) continue;
-      const v = win.data[py * win.w + px];
-      if (v === nodata || v == null) continue;
-      out[row * grid.width + col] = v;
+      xs[i] = x; ys[i] = y;
     }
+  }
+  return { xs, ys };
+}
+
+/**
+ * Sample a raster window onto the grid (nearest neighbour).
+ * win = {data, x0, y0, w, h, origin, resolution}; `proj` is either a function
+ * mapping [lon, lat] -> [x, y] or the output of projectGrid.
+ * Returns a Float32Array of grid size; NaN where outside or nodata.
+ */
+function sampleToGrid(grid, win, proj, nodata = 0) {
+  const P = typeof proj === 'function' ? projectGrid(grid, proj) : proj;
+  const n = grid.width * grid.height;
+  const out = new Float32Array(n).fill(NaN);
+  const [ox, oy] = win.origin;
+  const [rx, ry] = win.resolution;
+  for (let i = 0; i < n; i++) {
+    const px = Math.floor((P.xs[i] - ox) / rx) - win.x0;
+    const py = Math.floor((P.ys[i] - oy) / ry) - win.y0;
+    if (px < 0 || py < 0 || px >= win.w || py >= win.h) continue;
+    const v = win.data[py * win.w + px];
+    if (v === nodata || v == null) continue;
+    out[i] = v;
   }
   return out;
 }
@@ -377,7 +393,7 @@ function scaling(item, assetKey) {
 }
 
 globalThis.GCChange = {
-  SCL_VALID, SCL_CLOUDY, DEFAULTS, makeGrid, cellCenter, utmCode, gridBoundsIn, windowFor, sampleToGrid,
+  SCL_VALID, SCL_CLOUDY, DEFAULTS, makeGrid, cellCenter, utmCode, gridBoundsIn, windowFor, projectGrid, sampleToGrid,
   cloudBufferMask, sceneNdvi, validFraction, medianComposite, greenestComposite, classify, sieve, greennessShift,
   patches, summary, changeImage, rgbImage,
   patchesToGeoJSON, scaling,

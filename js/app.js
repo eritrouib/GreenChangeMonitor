@@ -104,8 +104,11 @@ $('#controls').addEventListener('submit', async (e) => {
   try {
     const reader = I.createReader({ GeoTIFF, proj4 });
     const onStatus = (t) => status(t, true);
-    const b = await I.yearComposite({ fetchFn: fetch, reader, grid, year: before, season, onStatus });
-    const a = await I.yearComposite({ fetchFn: fetch, reader, grid, year: after, season, onStatus });
+    // Both years at once: most of the time is spent waiting for image tiles.
+    const [b, a] = await Promise.all([
+      I.yearComposite({ fetchFn: fetch, reader, grid, year: before, season, onStatus }),
+      I.yearComposite({ fetchFn: fetch, reader, grid, year: after, season, onStatus }),
+    ]);
     status('Comparing…', true);
     // With only one clear image in a year, one reading per pixel is all there is.
     const minCount = Math.min(2, b.scenes.length, a.scenes.length);

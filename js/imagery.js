@@ -10,6 +10,8 @@
 const C = globalThis.GCChange;
 const EARTH_SEARCH = 'https://earth-search.aws.element84.com/v1';
 
+const BATCH = 4; // scenes checked at the same time
+
 const SEASONS = {
   summer: { label: 'Summer (June–August)', months: [6, 8] },
   growing: { label: 'Growing season (May–September)', months: [5, 9] },
@@ -58,6 +60,12 @@ function epsgOf(item) {
 /** Opens COGs and reads grid-aligned windows. */
 function createReader({ GeoTIFF, proj4 }) {
   const images = new Map();
+  const projected = new Map(); // cell centres per grid + UTM zone, reused by every scene and band
+  function projectedFor(grid, epsg, toProj) {
+    const key = `${grid.west},${grid.south},${grid.width},${grid.res}|${epsg}`;
+    if (!projected.has(key)) projected.set(key, C.projectGrid(grid, toProj));
+    return projected.get(key);
+  }
   async function open(href) {
     if (!images.has(href)) {
       images.set(href, GeoTIFF.fromUrl(href, { allowFullFile: true }).then((t) => t.getImage()).catch((e) => {
@@ -78,9 +86,10 @@ function createReader({ GeoTIFF, proj4 }) {
     const win = C.windowFor(bounds, origin, resolution, image.getWidth(), image.getHeight());
     if (!win) return samples.map(() => new Float32Array(grid.width * grid.height).fill(NaN));
     const rasters = await image.readRasters({ window: win, samples });
+    const P = projectedFor(grid, epsg, toProj);
     return samples.map((_, k) => C.sampleToGrid(grid, {
       data: rasters[k], x0: win[0], y0: win[1], w: win[2] - win[0], h: win[3] - win[1], origin, resolution,
-    }, toProj, nodata));
+    }, P, nodata));
   }
   return { readToGrid };
 }
@@ -114,34 +123,36 @@ async function yearComposite({ fetchFn, reader, grid, year, season, maxScenes = 
   onStatus(`Searching ${year} images…`);
   const candidates = spreadAcrossSeason(await searchScenes(fetchFn, grid, year, season));
   if (!candidates.length) throw new Error(`No ${year} images with little cloud were found for this area.`);
+  // Check clouds a few scenes at a time (in season order), stopping once enough clear ones are found.
   const chosen = [];
-  for (const item of candidates.slice(0, 12)) {
-    if (chosen.length >= maxScenes) break;
-    const date = item.properties.datetime.slice(0, 10);
-    onStatus(`${year}: checking clouds on ${date}…`);
-    const epsg = epsgOf(item);
-    let scl;
-    try {
-      [scl] = await reader.readToGrid(item.assets.scl.href, grid, epsg);
-    } catch (e) {
-      continue;
-    }
-    const vf = C.validFraction(scl);
-    if (vf < minValid) continue;
-    chosen.push({ item, epsg, scl, validFraction: vf, date });
+  const pool = candidates.slice(0, 12);
+  for (let k = 0; k < pool.length && chosen.length < maxScenes; k += BATCH) {
+    const batch = pool.slice(k, k + BATCH);
+    onStatus(`${year}: checking clouds on ${batch.length} image${batch.length === 1 ? '' : 's'}…`);
+    const checked = await Promise.all(batch.map(async (item) => {
+      try {
+        const epsg = epsgOf(item);
+        const [scl] = await reader.readToGrid(item.assets.scl.href, grid, epsg);
+        const vf = C.validFraction(scl);
+        return vf < minValid ? null : { item, epsg, scl, validFraction: vf, date: item.properties.datetime.slice(0, 10) };
+      } catch (e) {
+        return null;
+      }
+    }));
+    for (const c of checked) if (c && chosen.length < maxScenes) chosen.push(c);
   }
   if (!chosen.length) throw new Error(`Every ${year} image found was too cloudy over this area. Try the growing season or another year.`);
 
-  const layers = [];
-  for (const c of chosen) {
-    onStatus(`${year}: reading ${c.date}…`);
+  // Read red and near-infrared for all chosen scenes at once.
+  onStatus(`${year}: reading ${chosen.length} image${chosen.length === 1 ? '' : 's'}…`);
+  const layers = await Promise.all(chosen.map(async (c) => {
     const [[red], [nir]] = await Promise.all([
       reader.readToGrid(c.item.assets.red.href, grid, c.epsg),
       reader.readToGrid(c.item.assets.nir.href, grid, c.epsg),
     ]);
     const { scale, offset } = C.scaling(c.item, 'red');
-    layers.push(C.sceneNdvi(red, nir, c.scl, { scale, offset, width: grid.width }).ndvi);
-  }
+    return C.sceneNdvi(red, nir, c.scl, { scale, offset, width: grid.width }).ndvi;
+  }));
   const comp = C.greenestComposite(layers);
 
   let visual = null;
